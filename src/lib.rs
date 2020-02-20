@@ -1,4 +1,4 @@
-pub use reqwest::Client as ReqwestClient;
+pub use reqwest::blocking::Client as ReqwestClient;
 
 pub type JsonObject = serde_json::Map<String, serde_json::Value>;
 
