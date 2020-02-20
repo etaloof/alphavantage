@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/alphavantage.iml" filepath="$PROJECT_DIR$/alphavantage.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/alphavantage.iml" filepath="$PROJECT_DIR$/.idea/alphavantage.iml" />
     </modules>
   </component>
 </project>
