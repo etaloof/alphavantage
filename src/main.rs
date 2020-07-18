@@ -1,6 +1,6 @@
 use alphavantage::*;
 
 fn main() {
-    AlphavantageClient::new("demo", MockClient)
-        .search_endpoint("test");
+    let result = AlphavantageClient::new("demo", UreqClient).search_endpoint("test");
+    dbg!(result);
 }

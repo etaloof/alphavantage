@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::File;
 use std::io::prelude::*;
+use std::ops::Deref;
 use std::path::Path;
 
 use itertools::Itertools;
@@ -9,29 +10,30 @@ use select::document::Document;
 use select::node::Data;
 use select::node::Node;
 use select::predicate::*;
+use std::process::Command;
 
 struct Section<'a>(Node<'a>);
 
 impl<'a> Section<'a> {
     /// Generate a valid trait name from this section title
     fn trait_name(&self) -> String {
-        let name = self.0.find(Name("h2"))
-            .nth(0).unwrap()
-            .text();
+        let name = self.0.find(Name("h2")).nth(0).unwrap().text();
 
         // Remove anything in parentheses
         let invalid = Regex::new(r"\(.+?\)").unwrap();
         let name = invalid.replace(&name, "");
 
         let invalid = Regex::new("&").unwrap();
-        invalid.replace(&name, "").split_whitespace().collect::<Vec<_>>().join("")
+        invalid
+            .replace(&name, "And")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("")
     }
 
     /// Generate a the functions from this section
-    fn functions(&self) -> Vec<Function> {
-        self.0.find(Name("h4"))
-            .map(Function)
-            .collect()
+    fn functions(&self) -> impl Iterator<Item = Function> {
+        self.0.find(Name("h4")).map(Function)
     }
 }
 
@@ -40,19 +42,20 @@ struct Function<'a>(Node<'a>);
 impl<'a> Function<'a> {
     /// Extract the function name from this section
     fn name(&self) -> String {
-        self.0.children()
-            .nth(0).unwrap()
+        self.0
+            .children()
+            .nth(0)
+            .unwrap()
             .text()
             .trim()
             .to_lowercase()
-            .split_whitespace().collect::<Vec<_>>().join("_")
-            .to_owned()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("_")
     }
 
     fn raw_name(&self) -> String {
-        let text = self.0.children()
-            .nth(0).unwrap()
-            .text();
+        let text = self.0.children().nth(0).unwrap().text();
         let name = text.trim();
 
         // Small hack: because of inconsistencies in the HTML documentation we need to replace these names
@@ -69,21 +72,22 @@ impl<'a> Function<'a> {
     fn description(&self) -> String {
         let node = self.0;
 
-        FollowingNodes(node).filter(|node|
-            match node.data() {
+        following_nodes(node)
+            .filter(|node| match node.data() {
                 Data::Text(_) => false,
                 Data::Element(_, _) if node.is(Name("br")) => false,
                 _ => true,
             })
             .take_while(|node| !node.is(Name("h6")))
-            .map(|node| node.text()).join(" ")
+            .map(|node| node.text())
+            .join(" ")
     }
 
     /// Generate the parameters for this function
-    fn parameters(&self) -> Vec<Parameter> {
+    fn parameters(&self) -> impl Iterator<Item = Parameter> + 'a {
         let node = self.0;
 
-        FollowingNodes(node)
+        following_nodes(node)
             .filter(|node|
                 match node.data() {
                     Data::Text(_) => false,
@@ -97,7 +101,7 @@ impl<'a> Function<'a> {
                 if let Some(node) = it.next() {
                     Some((node, it.next()))
                 } else { None })
-            .filter_map(|(parameter, extra)| {
+            .filter_map(move |(parameter, extra)| {
                 let extra = extra
                     .expect(&format!("Couldn't parse extra information for node {:?}", parameter));
 
@@ -126,21 +130,25 @@ impl<'a> Function<'a> {
                 }
 
                 Some(Parameter { name, necessity })
-            }).collect()
+            })
     }
 
     fn write<T: Write>(&self, w: &mut T, with_body: bool) {
-        write!(w, "\n\t/// {}\n\t#[allow(clippy::too_many_arguments)]\n\tfn {}(", self.description(), self.name()).unwrap();
+        write!(
+            w,
+            "\n\t/// {}\n\t#[allow(clippy::too_many_arguments)]\n\tfn {}(",
+            self.description(),
+            self.name()
+        )
+        .unwrap();
 
-        {
-            write!(w, "&self").unwrap();
-            self.parameters()
-                .into_iter()
-                .filter(|parameter| parameter.name != "apikey" && parameter.name != "function")
-                .for_each(|parameter| {
-                    write!(w, ", ").unwrap();
-                    parameter.write(w, ParameterWriteMode::SuffixType)
-                })
+        write!(w, "&self").unwrap();
+        let parameters = self.parameters();
+        for parameter in parameters {
+            if parameter.name != "apikey" && parameter.name != "function" {
+                write!(w, ", ").unwrap();
+                parameter.write(w, ParameterWriteMode::SuffixType)
+            }
         }
 
         if !with_body {
@@ -150,31 +158,31 @@ impl<'a> Function<'a> {
 
         writeln!(w, ") -> JsonObject {{").unwrap();
 
-        {
-            write!(w, "\t\tlet url = format!(\"https://www.alphavantage.co/query?").unwrap();
+        write!(
+            w,
+            "\t\tlet url = format!(\"https://www.alphavantage.co/query?"
+        )
+        .unwrap();
 
-            let mut parameters = self.parameters().into_iter();
+        let mut parameters = self.parameters().into_iter();
 
-            write!(w, "{}{}", parameters.next().unwrap().name, "={}").unwrap();
-            for parameter in parameters {
-                write!(w, "&{}{}", parameter.name, "={}").unwrap();
-            }
-
-            write!(w, r#"""#).unwrap();
-            for parameter in self.parameters() {
-                write!(w, ", ").unwrap();
-
-                if parameter.name == "apikey" {
-                    write!(w, "self.apikey").unwrap();
-                } else if parameter.name == "function" {
-                    write!(w, r#""{}""#, self.raw_name()).unwrap();
-                } else {
-                    parameter.write(w, ParameterWriteMode::OnlyName);
-                }
-            }
-
-            writeln!(w, ");\n\t\tself.client.get(&url)").unwrap();
+        write!(w, "{}{}", parameters.next().unwrap().name, "={}").unwrap();
+        for parameter in parameters {
+            write!(w, "&{}{}", parameter.name, "={}").unwrap();
         }
+
+        write!(w, r#"""#).unwrap();
+        for parameter in self.parameters() {
+            write!(w, ", ").unwrap();
+
+            match parameter.name.deref() {
+                "apikey" => write!(w, "self.apikey").unwrap(),
+                "function" => write!(w, r#""{}""#, self.raw_name()).unwrap(),
+                _ => parameter.write(w, ParameterWriteMode::OnlyName),
+            }
+        }
+
+        writeln!(w, ");\n\t\tself.client.get(&url)").unwrap();
 
         writeln!(w, "\t}}").unwrap();
     }
@@ -205,41 +213,23 @@ impl Parameter {
         match mode {
             ParameterWriteMode::SuffixType => write!(w, "{}: &str", self.name),
             ParameterWriteMode::OnlyName => write!(w, "{}", self.name),
-        }.unwrap();
+        }
+        .unwrap();
     }
 }
 
 /// An Iterator which returns the Node following the current one
 /// until there are no more node left.
-///
-/// ```
-/// let document = Document::from(
-/// "<html>
-///     <body>
-///         <p>Hello</p>
-///         <p>World</p>
-///     </body>
-/// </html>");
-///
-/// let node = document.find(Name("p")).nth(0);
-/// let nodes = FollowingNodes(node)
-///     .map(|node| node.text())
-///     .collect::<Vec<_>();
-/// assert_eq(&*nodes, &["Hello", "World"]);
-/// ```
-struct FollowingNodes<'a>(Node<'a>);
-
-impl<'a> Iterator for FollowingNodes<'a> {
-    type Item = Node<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(node) = self.0.next() {
-            self.0 = node;
-            Some(node)
+fn following_nodes(node: Node) -> impl Iterator<Item = Node> {
+    let mut node = node;
+    std::iter::from_fn(move || {
+        if let Some(next) = node.next() {
+            node = next;
+            Some(next)
         } else {
             None
         }
-    }
+    })
 }
 
 fn main() {
@@ -251,11 +241,15 @@ fn main() {
 
     let document = Document::from(DOCUMENTATION);
 
-    let main_content = document.find(Descendant(Attr("class", "container-fluid"), Name("article")))
-        .nth(0).unwrap();
+    let main_content = document
+        .find(Descendant(
+            Attr("class", "container-fluid"),
+            Name("article"),
+        ))
+        .nth(0)
+        .unwrap();
 
-    let parsed_sections: Vec<_> = main_content.find(Name("section"))
-        .map(Section).collect();
+    let parsed_sections: Vec<_> = main_content.find(Name("section")).map(Section).collect();
 
     for section in &parsed_sections {
         writeln!(&mut f, "pub trait {} {{", section.trait_name()).unwrap();
@@ -266,9 +260,12 @@ fn main() {
 
         writeln!(&mut f, "}}\n").unwrap();
 
-
-        writeln!(&mut f, "impl<'a, T> {} for AlphavantageClient<'a, T>\n\twhere T: MockableClient {{",
-                 section.trait_name()).unwrap();
+        writeln!(
+            &mut f,
+            "impl<'a, T> {} for AlphavantageClient<'a, T>\n\twhere T: RequestClient {{",
+            section.trait_name()
+        )
+        .unwrap();
 
         for function in section.functions() {
             function.write(&mut f, true)
@@ -276,4 +273,10 @@ fn main() {
 
         writeln!(&mut f, "}}\n").unwrap();
     }
+
+    Command::new("rustfmt")
+        .arg("--backup")
+        .arg(&dest_path)
+        .spawn()
+        .unwrap();
 }
