@@ -129,6 +129,19 @@ impl RequestClient for MockClient {
     }
 }
 
+impl<F> RequestClient for F
+where
+    F: Fn(&str) -> JsonObject,
+{
+    fn get(&self, url: &str) -> JsonObject {
+        self(url)
+    }
+
+    fn new() -> Self {
+        panic!("AlphavantageClient cannot be constructed from api key when RequestClient is a function")
+    }
+}
+
 pub struct AlphavantageClient<'a, T> {
     apikey: &'a str,
     client: T,
