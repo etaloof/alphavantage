@@ -101,10 +101,9 @@ impl<'a> Function<'a> {
             .skip_while(|node| !node.is(Name("h6"))) // skip description
             .skip(1) // skip heading
             .take_while(|node| !node.is(Name("h6")))
-            .batching(|it|
-                if let Some(node) = it.next() {
-                    Some((node, it.next()))
-                } else { None })
+            .batching(|iter|
+                iter.next().map(|node| (node, iter.next()))
+            )
             .filter_map(move |(parameter, extra)| {
                 let extra = extra
                     .expect(&format!("Couldn't parse extra information for node {:?}", parameter));
@@ -120,7 +119,7 @@ impl<'a> Function<'a> {
                         match extra.find(Name("code")).nth(0) {
                             Some(n) => {
                                 let default = n.text();
-                                default.split("=").collect::<Vec<_>>()[1].to_owned()
+                                default.split("=").nth(1).unwrap().to_owned()
                             }
                             _ => panic!("Couldn't parse parameter necessity default (invalid value at {:?})!", node),
                         }
