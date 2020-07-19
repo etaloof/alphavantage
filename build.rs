@@ -12,6 +12,10 @@ use select::node::Node;
 use select::predicate::*;
 use std::process::Command;
 
+use quote::*;
+use proc_macro2::TokenStream;
+use proc_macro2::Literal;
+
 struct Section<'a>(Node<'a>);
 
 impl<'a> Section<'a> {
@@ -32,7 +36,7 @@ impl<'a> Section<'a> {
     }
 
     /// Generate a the functions from this section
-    fn functions(&self) -> impl Iterator<Item = Function> {
+    fn functions(&self) -> impl Iterator<Item=Function> {
         self.0.find(Name("h4")).map(Function)
     }
 }
@@ -84,7 +88,7 @@ impl<'a> Function<'a> {
     }
 
     /// Generate the parameters for this function
-    fn parameters(&self) -> impl Iterator<Item = Parameter> + 'a {
+    fn parameters(&self) -> impl Iterator<Item=Parameter> + 'a {
         let node = self.0;
 
         following_nodes(node)
@@ -133,58 +137,53 @@ impl<'a> Function<'a> {
             })
     }
 
-    fn write<T: Write>(&self, w: &mut T, with_body: bool) {
-        write!(
-            w,
-            "\n\t/// {}\n\t#[allow(clippy::too_many_arguments)]\n\tfn {}(",
-            self.description(),
-            self.name()
-        )
-        .unwrap();
-
-        write!(w, "&self").unwrap();
-        let parameters = self.parameters();
-        for parameter in parameters {
-            if parameter.name != "apikey" && parameter.name != "function" {
-                write!(w, ", ").unwrap();
-                parameter.write(w, ParameterWriteMode::SuffixType)
-            }
-        }
-
-        if !with_body {
-            writeln!(w, ") -> JsonObject;").unwrap();
-            return;
-        }
-
-        writeln!(w, ") -> JsonObject {{").unwrap();
-
-        write!(
-            w,
-            "\t\tlet url = format!(\"https://www.alphavantage.co/query?"
-        )
-        .unwrap();
-
+    fn to_tokens_with_body(&self) -> TokenStream {
+        use std::fmt::Write;
+        let mut lit = format!("https://www.alphavantage.co/query?");
         let mut parameters = self.parameters().into_iter();
-
-        write!(w, "{}{}", parameters.next().unwrap().name, "={}").unwrap();
+        write!(lit, "{}{}", parameters.next().unwrap().name, "={}").unwrap();
         for parameter in parameters {
-            write!(w, "&{}{}", parameter.name, "={}").unwrap();
+            write!(lit, "&{}{}", parameter.name, "={}").unwrap();
         }
+        let lit = Literal::string(&lit);
 
-        write!(w, r#"""#).unwrap();
-        for parameter in self.parameters() {
-            write!(w, ", ").unwrap();
+        let args = self.parameters()
+            .into_iter()
+            .map(|p| match p.name.deref() {
+                "apikey" => quote!(self.apikey),
+                "function" => Literal::string(&self.raw_name()).to_token_stream(),
+                _ => format_ident!("{}", p.name).to_token_stream(),
+            });
 
-            match parameter.name.deref() {
-                "apikey" => write!(w, "self.apikey").unwrap(),
-                "function" => write!(w, r#""{}""#, self.raw_name()).unwrap(),
-                _ => parameter.write(w, ParameterWriteMode::OnlyName),
+        let signature = self.to_tokens_head();
+        quote!(
+            #signature {
+                let url = format!(#lit, #(#args),*);
+                self.client.get(&url)
             }
-        }
+        )
+    }
 
-        writeln!(w, ");\n\t\tself.client.get(&url)").unwrap();
+    fn to_tokens_head(&self) -> TokenStream {
+        let description = self.description();
+        let name = format_ident!("{}", self.name());
+        let parameters = self.parameters()
+            .filter(|p| p.name != "apikey" && p.name != "function")
+            .map(|x| format_ident!("{}", x.name))
+            .map(|x| quote!(#x: &str));
+        let parameters = std::iter::once(quote!(&self))
+            .chain(parameters);
+        quote!(
+            #[doc = #description]
+            fn #name(#(#parameters),*) -> JsonObject
+        )
+    }
 
-        writeln!(w, "\t}}").unwrap();
+    fn to_tokens(&self) -> TokenStream {
+        let signature = self.to_tokens_head();
+        quote!(
+            #signature;
+        )
     }
 }
 
@@ -200,27 +199,9 @@ struct Parameter {
     necessity: ParameterNecessity,
 }
 
-/// Specify how this Parameter should be written to the writer
-enum ParameterWriteMode {
-    /// write the name attribute
-    OnlyName,
-    /// like Name but appends the type
-    SuffixType,
-}
-
-impl Parameter {
-    fn write<T: Write>(&self, w: &mut T, mode: ParameterWriteMode) {
-        match mode {
-            ParameterWriteMode::SuffixType => write!(w, "{}: &str", self.name),
-            ParameterWriteMode::OnlyName => write!(w, "{}", self.name),
-        }
-        .unwrap();
-    }
-}
-
 /// An Iterator which returns the Node following the current one
 /// until there are no more node left.
-fn following_nodes(node: Node) -> impl Iterator<Item = Node> {
+fn following_nodes(node: Node) -> impl Iterator<Item=Node> {
     let mut node = node;
     std::iter::from_fn(move || {
         if let Some(next) = node.next() {
@@ -249,33 +230,39 @@ fn main() {
         .nth(0)
         .unwrap();
 
-    let parsed_sections: Vec<_> = main_content.find(Name("section")).map(Section).collect();
+    let parsed_sections: Vec<_> = main_content
+        .find(Name("section"))
+        .map(Section)
+        .collect();
 
     for section in &parsed_sections {
-        writeln!(&mut f, "pub trait {} {{", section.trait_name()).unwrap();
+        let trait_name = format_ident!("{}", section.trait_name());
+        let functions = section.functions()
+            .map(|function| function.to_tokens());
 
-        for function in section.functions() {
-            function.write(&mut f, false)
-        }
+        let q = quote! {
+            pub trait #trait_name {
+                #(#functions) *
+            }
+        };
+        writeln!(&mut f, "{}", q).unwrap();
 
-        writeln!(&mut f, "}}\n").unwrap();
-
-        writeln!(
-            &mut f,
-            "impl<'a, T> {} for AlphavantageClient<'a, T>\n\twhere T: RequestClient {{",
-            section.trait_name()
-        )
-        .unwrap();
-
-        for function in section.functions() {
-            function.write(&mut f, true)
-        }
-
-        writeln!(&mut f, "}}\n").unwrap();
+        let functions = section.functions()
+            .map(|function| function.to_tokens_with_body());
+        let q = quote! {
+            impl<'a, T> #trait_name for AlphavantageClient<'a, T>
+                where T: RequestClient {
+                    #(#functions) *
+                }
+        };
+        writeln!(&mut f, "{}", q).unwrap();
     }
 
     Command::new("rustfmt")
         .arg("--backup")
+        // definitely add fn_params_layout=vertical once rustfmt 2 is released
+        .arg("--config")
+        .arg("edition=2018,format_strings=true,wrap_comments=true,normalize_doc_attributes=true")
         .arg(&dest_path)
         .spawn()
         .unwrap();
