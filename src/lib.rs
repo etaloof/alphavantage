@@ -15,8 +15,7 @@ pub struct UreqClient;
 #[cfg(feature = "ureq-lib")]
 impl RequestClient for UreqClient {
     fn get(&self, url: &str) -> JsonObject {
-        let response = ureq::get(url).call();
-        serde_json::from_reader(response.into_reader()).unwrap()
+        ureq::get(url).call().into_json_deserialize().unwrap()
     }
 
     fn new() -> Self {
