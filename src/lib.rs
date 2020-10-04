@@ -1,10 +1,17 @@
-#[cfg(feature = "reqwest-lib")]
-pub use reqwest::blocking::Client as ReqwestClient;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum AlphavantageError {
+    #[error("could not deserialize into json")]
+    InvalidJson(#[from] serde_json::Error),
+    #[error("the network request failed")]
+    Network(Box<dyn std::error::Error>),
+}
 
 pub type JsonObject = serde_json::Map<String, serde_json::Value>;
 
 pub trait RequestClient {
-    fn get(&self, url: &str) -> JsonObject;
+    fn get(&self, url: &str) -> Result<JsonObject, AlphavantageError>;
 
     fn new() -> Self;
 }
@@ -14,12 +21,25 @@ pub struct UreqClient;
 
 #[cfg(feature = "ureq-lib")]
 impl RequestClient for UreqClient {
-    fn get(&self, url: &str) -> JsonObject {
-        ureq::get(url).call().into_json_deserialize().unwrap()
+    fn get(&self, url: &str) -> Result<JsonObject, AlphavantageError> {
+        let response = ureq::get(url).call();
+        if let Some(err) = response.synthetic_error() {
+            Err(err.into())
+        } else {
+            let reader = response.into_reader();
+            Ok(serde_json::from_reader(reader)?)
+        }
     }
 
     fn new() -> Self {
         Self
+    }
+}
+
+#[cfg(feature = "ureq-lib")]
+impl From<&ureq::Error> for AlphavantageError {
+    fn from(err: &ureq::Error) -> Self {
+        AlphavantageError::Network(err.to_string().into())
     }
 }
 
@@ -28,7 +48,7 @@ pub struct HarpClient;
 
 #[cfg(feature = "harp-lib")]
 impl RequestClient for HarpClient {
-    fn get(&self, url: &str) -> JsonObject {
+    fn get(&self, url: &str) -> Result<JsonObject, AlphavantageError> {
         unimplemented!("harp does not currently support HTTPS");
 
         use harp::*;
@@ -82,17 +102,15 @@ impl RequestClient for HarpClient {
                 todo!("implement nice error handling for invalid urls");
             }
         };
-
-        let options = Default::default();
-        let connection = Connection::open(host, port, &options).unwrap();
-
-        dbg!(&url[consumed - 1..]);
         let path_and_query = &url[consumed..];
-        dbg!(path_and_query);
 
-        let body = &request::Body::new(&[]);
+        let opts = &Default::default();
+        let connection = Connection::open(host, port, opts).unwrap();
+
+        let body = &Default::default();
         let response = connection.get(path_and_query, body).unwrap().into_vec();
-        serde_json::from_slice(&response).unwrap()
+        let reader = std::io::Cursor::new(response);
+        Ok(serde_json::from_reader(reader)?)
     }
 
     fn new() -> Self {
@@ -101,13 +119,16 @@ impl RequestClient for HarpClient {
 }
 
 #[cfg(feature = "reqwest-lib")]
+pub use reqwest::blocking::Client as ReqwestClient;
+
+#[cfg(feature = "reqwest-lib")]
 impl RequestClient for ReqwestClient {
-    fn get(&self, url: &str) -> JsonObject {
-        self.get(url)
-            .send()
-            .expect("Couldn't send download request")
-            .json()
-            .expect("Couldn't parse json response")
+    fn get(&self, url: &str) -> Result<JsonObject, AlphavantageError> {
+        let response = self.get(url)
+            .send()?
+            .bytes()?;
+        let reader = std::io::Cursor::new(response);
+        Ok(serde_json::from_reader(reader)?)
     }
 
     fn new() -> Self {
@@ -115,12 +136,19 @@ impl RequestClient for ReqwestClient {
     }
 }
 
+#[cfg(feature = "reqwest-lib")]
+impl From<reqwest::Error> for AlphavantageError {
+    fn from(value: reqwest::Error) -> Self {
+        AlphavantageError::Network(value.to_string().into())
+    }
+}
+
 pub struct MockClient;
 
 impl RequestClient for MockClient {
-    fn get(&self, url: &str) -> JsonObject {
+    fn get(&self, url: &str) -> Result<JsonObject, AlphavantageError> {
         eprintln!("MockClient: Making request to {}", url);
-        serde_json::Map::new()
+        Ok(serde_json::Map::new())
     }
 
     fn new() -> Self {
@@ -129,10 +157,10 @@ impl RequestClient for MockClient {
 }
 
 impl<F> RequestClient for F
-where
-    F: Fn(&str) -> JsonObject,
+    where
+        F: Fn(&str) -> Result<JsonObject, AlphavantageError>,
 {
-    fn get(&self, url: &str) -> JsonObject {
+    fn get(&self, url: &str) -> Result<JsonObject, AlphavantageError> {
         self(url)
     }
 

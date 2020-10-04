@@ -139,7 +139,7 @@ impl<'a> Function<'a> {
     fn to_tokens_with_body(&self) -> TokenStream {
         use std::fmt::Write;
         let mut lit = format!("https://www.alphavantage.co/query?");
-        let mut parameters = self.parameters().into_iter();
+        let mut parameters = self.parameters();
         write!(lit, "{}{}", parameters.next().unwrap().name, "={}").unwrap();
         for parameter in parameters {
             write!(lit, "&{}{}", parameter.name, "={}").unwrap();
@@ -147,7 +147,6 @@ impl<'a> Function<'a> {
         let lit = Literal::string(&lit);
 
         let args = self.parameters()
-            .into_iter()
             .map(|p| match p.name.deref() {
                 "apikey" => quote!(self.apikey),
                 "function" => Literal::string(&self.raw_name()).to_token_stream(),
@@ -174,7 +173,7 @@ impl<'a> Function<'a> {
             .chain(parameters);
         quote!(
             #[doc = #description]
-            fn #name(#(#parameters),*) -> JsonObject
+            fn #name(#(#parameters),*) -> Result<JsonObject, AlphavantageError>
         )
     }
 
@@ -229,12 +228,11 @@ fn main() {
         .nth(0)
         .unwrap();
 
-    let parsed_sections: Vec<_> = main_content
+    let parsed_sections = main_content
         .find(Name("section"))
-        .map(Section)
-        .collect();
+        .map(Section);
 
-    for section in &parsed_sections {
+    for section in parsed_sections {
         let trait_name = format_ident!("{}", section.trait_name());
         let functions = section.functions()
             .map(|function| function.to_tokens());
