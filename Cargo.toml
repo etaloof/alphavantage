@@ -3,6 +3,7 @@ name = "alphavantage"
 version = "0.1.0"
 authors = ["Stefan Lukas <afc11hn@hotmail.de>"]
 edition = "2018"
+license = "MIT"
 
 [features]
 default = ["ureq-lib"]
